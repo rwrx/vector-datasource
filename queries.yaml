@@ -9,6 +9,7 @@ all:
   - boundaries
   - transit
   - admin_areas
+  - landmarks
 
 sources:
 
@@ -23,6 +24,7 @@ sources:
   planet_osm_polygon:
     - template: planet_osm_polygon.jinja2
       # landuse and pois start at 4
+      # seas start at zoom 2 (but will "pop" in at 4 in this config)
       start_zoom: 4
   planet_osm_line:
     - template: planet_osm_line.jinja2
@@ -30,6 +32,7 @@ sources:
       start_zoom: 5
   planet_osm_point:
     # earth and places start at zoom 0
+    # ocean and seas start at zoom 1 and 5 respectively
     - template: planet_osm_point.jinja2
 
   ne:
@@ -193,6 +196,7 @@ layers:
       - vectordatasource.transform.unpack_places_disputes
       - vectordatasource.transform.apply_places_with_viewpoints
       - vectordatasource.transform.calculate_default_place_min_zoom
+      - vectordatasource.transform.override_with_ne_names
       - vectordatasource.transform.add_id_to_properties
       - vectordatasource.transform.detect_osm_relation
       - vectordatasource.transform.remove_feature_id
@@ -337,6 +341,15 @@ layers:
       - vectordatasource.transform.add_id_to_properties
       - vectordatasource.transform.remove_feature_id
     area-inclusion-threshold: 1
+  # optional inline layer, if the file is found on disk it will be used
+  landmarks:
+    geometry_types: [Point, Polygon, MultiPolygon]
+    clip: false
+    area-inclusion-threshold: 1
+    simplify_before_intersect: false
+    simplify_start: 0,
+    pre_processed_layer_path: ./metatile-layers/landmarks.geojson
+
 post_process:
   - fn: vectordatasource.transform.build_fence
     params:
@@ -540,6 +553,23 @@ post_process:
     params:
       source_layer: roads
       properties: [layer]
+
+  # supersede existing osm buildings with data from landmark geojson layer
+  - fn: vectordatasource.transform.overlap
+    params:
+      base_layer: buildings
+      cutting_layer: landmarks
+      attribute: supersede
+      target_attribute: superseded_by
+      linear: false
+
+  # turn the landmark geojson polygons into point features
+  - fn: vectordatasource.transform.mutate
+    params:
+      layer: landmarks
+      start_zoom: 13
+      geometry_expression: Point({properties}['origin'])
+      properties_expression: "dict(filter(lambda p: p[0] not in ['supersede', 'origin'], {properties}.items()))"
 
   # cut with admin_areas to put country_code attributes on roads
   # which are mostly within a particular country.
@@ -875,7 +905,7 @@ post_process:
   - fn: vectordatasource.transform.update_min_zoom
     params:
       source_layer: water
-      start_zoom: 4
+      start_zoom: 2
       end_zoom: 16
       # the inclusion of "None" in the list might seem odd, but None compares
       # numerically smaller than any integer, so acts as a default for this
@@ -901,8 +931,9 @@ post_process:
         ] if area >= area_threshold][0]
       # note the following line cannot be written as
       # properties is not None and properties.get('label_placement') is True
+      # and we exclude sea and ocean because those are pre-graded
       where: >-
-        properties is not None and label_placement
+        properties is not None and label_placement and kind not in ('sea', 'ocean')
 
   # now that we have the label points
   # drop most water properties at lower zooms
@@ -1008,9 +1039,9 @@ post_process:
   - fn: vectordatasource.transform.drop_features_where
     params:
       source_layer: water
-      start_zoom: 3
+      start_zoom: 2
       where: >-
-        'label_placement' not in properties and kind in ('sea', 'bay', 'strait', 'fjord')
+        'label_placement' not in properties and kind in ('sea', 'bay', 'strait', 'fjord', 'marina', 'harbour')
   - fn: vectordatasource.transform.drop_features_where
     params:
       source_layer: earth
@@ -1864,6 +1895,7 @@ post_process:
         - addr_housenumber
         - addr_street
         - osm_relation
+      exclude: ['superseded_by']
       # NOTE: max_merged_features is set to keep the time taken for geometry
       # merging down, as it seems to go up with the square of the number of
       # features.

@@ -1,5 +1,6 @@
 # -*- encoding: utf-8 -*-
 # transformation functions to apply to features
+import copy
 import csv
 import re
 from collections import defaultdict
@@ -410,8 +411,12 @@ def place_population_int(shape, properties, fid, zoom):
     return shape, properties, fid
 
 
-def population_rank(shape, properties, fid, zoom):
-    population = properties.get('population')
+def _calculate_population_rank(population):
+    population = to_float(population)
+    if population is None:
+        population = 0
+    else:
+        population = int(population)
     pop_breaks = [
         1000000000,
         100000000,
@@ -438,8 +443,12 @@ def population_rank(shape, properties, fid, zoom):
             break
     else:
         rank = 0
+    return rank
 
-    properties['population_rank'] = rank
+
+def population_rank(shape, properties, fid, zoom):
+    population = properties.get('population')
+    properties['population_rank'] = _calculate_population_rank(population)
     return (shape, properties, fid)
 
 
@@ -455,7 +464,6 @@ def pois_direction_int(shape, props, fid, zoom):
     direction = props.get('direction')
     if not direction:
         return shape, props, fid
-
     props['direction'] = _to_int_degrees(direction)
     return shape, props, fid
 
@@ -522,7 +530,24 @@ def _alpha_2_code_of(lang):
 LangResult = namedtuple('LangResult', ['code', 'priority'])
 
 
+zh_alpha_2_lang_code = 'zh'
+
+# key is the name in WOF source; value is the Tilezen internal name and its
+# priority
+wof_zh_variants_lookup = {
+    'zho_cn_x_preferred': ('zh-Hans', 0),  # Simplified Chinese
+    'zho_x_preferred': ('zh-Hans', 1),  # Simplified Chinese
+    'wuu_x_preferred': ('zh-Hans', 2),  # Simplified Chinese
+    'zho_tw_x_preferred': ('zh-Hant', 0),  # Traditional Chinese
+    'zho_x_variant': ('zh-Hant', 1),  # Traditional Chinese
+}
+
+
 def _convert_wof_l10n_name(x):
+    if x in wof_zh_variants_lookup:
+        return LangResult(code=wof_zh_variants_lookup[x][0],
+                          priority=wof_zh_variants_lookup[x][1])
+
     lang_str_iso_639_3 = x[:3]
     if len(lang_str_iso_639_3) != 3:
         return None
@@ -530,17 +555,38 @@ def _convert_wof_l10n_name(x):
         lang = pycountry.languages.get(alpha_3=lang_str_iso_639_3)
     except KeyError:
         return None
+
+    lang_code = _alpha_2_code_of(lang)
+    if lang_code == zh_alpha_2_lang_code:
+        return None
     return LangResult(code=_alpha_2_code_of(lang), priority=0)
 
 
+# key is the name in NE source; value is a tuple of Tilezen internal
+# name and its priority value
+ne_zh_variants_lookup = {
+    'zh': ('zh-Hans', 0),  # Simplified Chinese
+    'zht': ('zh-Hant', 0),  # Traditional Chinese
+}
+
+
 def _convert_ne_l10n_name(x):
+    if x in ne_zh_variants_lookup:
+        return LangResult(code=ne_zh_variants_lookup[x][0],
+                          priority=ne_zh_variants_lookup[x][1])
+
     if len(x) != 2:
         return None
     try:
         lang = pycountry.languages.get(alpha_2=x)
     except KeyError:
         return None
-    return LangResult(code=_alpha_2_code_of(lang), priority=0)
+
+    lang_code = _alpha_2_code_of(lang)
+    if lang_code == zh_alpha_2_lang_code:
+        return None
+
+    return LangResult(code=lang_code, priority=0)
 
 
 def _normalize_osm_lang_code(x):
@@ -578,18 +624,39 @@ def _normalize_country_code(x):
 
 osm_l10n_lookup = set([
     'zh-min-nan',
-    'zh-yue'
 ])
+
+
+# key is the name in OSM source; value is a tuple of Tilezen internal name
+# and its priority value
+osm_zh_variants_lookup = {
+    'zh-Hans': ('zh-Hans', 0),  # Simplified Chinese
+    'zh-SG': ('zh-Hans', 1),  # Simplified Chinese
+    'zh': ('zh-default', 0),  # Simplified Chinese presumably, can contain Traditional Chinese
+    'zh-Hant': ('zh-Hant', 0),    # Traditional Chinese
+    'zh-Hant-tw': ('zh-Hant', 1),  # Traditional Chinese
+    'zh-Hant-hk': ('zh-Hant', 2),  # Traditional Chinese
+    'zh-yue': ('zh-Hant', 3),  # Traditional Chinese
+    'zh-HK': ('zh-Hant', 4),  # Traditional Chinese
+}
 
 
 def _convert_osm_l10n_name(x):
     if x in osm_l10n_lookup:
         return LangResult(code=x, priority=0)
 
+    if x in osm_zh_variants_lookup:
+        return LangResult(code=osm_zh_variants_lookup[x][0],
+                          priority=osm_zh_variants_lookup[x][1])
+
+    # all accepted Chinese variants should be handled in the shortcuts already
+    # so won't accept other tags that starts with `zh` any more
+    if x.startswith('zh'):
+        return None
+
     if '_' not in x:
         lang_code_candidate = x
         country_candidate = None
-
     else:
         fields_by_underscore = x.split('_', 1)
         lang_code_candidate, country_candidate = fields_by_underscore
@@ -611,7 +678,115 @@ def _convert_osm_l10n_name(x):
     else:
         result = lang_code_result
 
+    if result == zh_alpha_2_lang_code:
+        return None
+
     return LangResult(code=result, priority=priority)
+
+
+def post_process_ne_wof_zh(properties):
+    """ If there is no Simplified Chinese, Traditional
+    Chinese will be used to further backfill, and vice versa """
+    if 'name:zh-Hans' not in properties and 'name:zh-Hant' in properties:
+        properties['name:zh-Hans'] = properties['name:zh-Hant']
+
+    if 'name:zh-Hant' not in properties and 'name:zh-Hans' in properties:
+        properties['name:zh-Hant'] = properties['name:zh-Hans']
+
+
+def clean_backfill_zh(properties):
+    """ only select one of the options if the field is separated by "/"
+    for example if the field is "旧金山市县/三藩市市縣/舊金山市郡" only the first
+    one 旧金山市县 will be preserved
+    also some data source may have leading backslash char or whitespace,
+    need to remove those too.
+
+    Also for backward compatibility, we also populate name:zh field
+
+    Finally, if any of the 'name:zh-Hans', 'name:zh-Hant' or 'name:zh' field
+    is empty or is whitespace string, we remove it.
+    """
+    if properties.get('name:zh-Hans'):
+        properties['name:zh-Hans'] = properties['name:zh-Hans'].split('/')[0].strip().strip('\\')
+    if properties.get('name:zh-Hant'):
+        properties['name:zh-Hant'] = properties['name:zh-Hant'].split('/')[0].strip().strip('\\')
+
+    if properties.get('name:zh-Hans'):
+        properties['name:zh'] = properties['name:zh-Hans']
+    elif properties.get('name:zh-Hant'):
+        properties['name:zh'] = properties['name:zh-Hant']
+
+    # if the field is empty/whitespace string we don't include the properties
+    if 'name:zh-Hans' in properties and \
+            (properties['name:zh-Hans'] is None or
+             not properties['name:zh-Hans'].strip()):
+        del properties['name:zh-Hans']
+
+    if 'name:zh-Hant' in properties and \
+            (properties['name:zh-Hant'] is None or
+             not properties['name:zh-Hant'].strip()):
+        del properties['name:zh-Hant']
+
+    if 'name:zh' in properties and \
+            (properties['name:zh'] is None or
+             not properties['name:zh'].strip()):
+        del properties['name:zh']
+
+
+def post_process_osm_zh(properties):
+    """ First check whether name:zh (Simplified) and name:zht(Traditional)
+    are set already, if not we use the name:zh-default to backfill them.
+    During the backfill, if there is no Simplified Chinese, Traditional
+    Chinese will be used to further backfill, and vice versa
+    It also deletes the intermediate property `zh-default`
+    Before the function returns, 'name:zh-Hant' or 'name:zh-Hans' may
+    contain an empty string or whitespaces string.
+    """
+
+    if 'name:zh-Hans' not in properties and 'name:zh-Hant' not in properties and \
+            'name:zh-default' not in properties:
+        return
+
+    if 'name:zh-Hans' in properties and 'name:zh-Hant' in properties:
+        if 'name:zh-default' in properties:
+            del properties['name:zh-default']
+        return
+
+    zh_Hans_fallback = properties['name:zh-Hans'] if 'name:zh-Hans' in \
+                                                     properties else u''
+    zh_Hant_fallback = properties['name:zh-Hant'] if 'name:zh-Hant' in \
+                                                     properties else u''
+
+    if properties.get('name:zh-default'):
+        names = properties['name:zh-default'].split('/')
+        for name in names:
+            if hanzidentifier.is_simplified(name) and \
+                    len(zh_Hans_fallback) == 0:
+                zh_Hans_fallback = name
+            if hanzidentifier.is_traditional(name) and \
+                    len(zh_Hant_fallback) == 0:
+                zh_Hant_fallback = name
+        # hanzidentifier cannot deem it either way
+        if len(names) != 0:
+            if len(zh_Hans_fallback) == 0:
+                zh_Hans_fallback = names[0]
+            if len(zh_Hant_fallback) == 0:
+                zh_Hant_fallback = names[0]
+
+    if not properties.get('name:zh-Hans'):
+        if zh_Hans_fallback:
+            properties['name:zh-Hans'] = zh_Hans_fallback
+        elif zh_Hant_fallback:
+            properties['name:zh-Hans'] = zh_Hant_fallback
+
+    if not properties.get('name:zh-Hant'):
+        if zh_Hant_fallback:
+            properties['name:zh-Hant'] = zh_Hant_fallback
+        elif zh_Hans_fallback:
+            properties['name:zh-Hant'] = zh_Hans_fallback
+
+    if 'name:zh-default' in properties:
+        del properties['name:zh-default']
 
 
 def tags_name_i18n(shape, properties, fid, zoom):
@@ -674,6 +849,14 @@ def tags_name_i18n(shape, properties, fid, zoom):
     for lang_key, (lang, v) in langs.items():
         properties[lang_key] = v
 
+    if is_osm:
+        post_process_osm_zh(properties)
+
+    if is_wof or is_ne:
+        post_process_ne_wof_zh(properties)
+
+    clean_backfill_zh(properties)
+
     for alt_tag_name_candidate in tag_name_alternates:
         alt_tag_name_value = tags.get(alt_tag_name_candidate)
         if alt_tag_name_value and alt_tag_name_value != name:
@@ -710,9 +893,9 @@ def _sorted_attributes(features, attrs, attribute):
     sort_key = attrs.get('sort_key')
     reverse = attrs.get('reverse')
 
-    assert sort_key is not None, "Configuration " + \
+    assert sort_key is not None, 'Configuration ' + \
         "parameter 'sort_key' is missing, please " + \
-        "check your configuration."
+        'check your configuration.'
 
     # first, we find the _minimum_ ordering over the
     # group of key values. this is because we only do
@@ -776,8 +959,8 @@ _GEOMETRY_DIMENSIONS = {
 #   4: contains a polygon / two-dimensional object
 def _geom_dimensions(g):
     dim = _GEOMETRY_DIMENSIONS.get(g.geom_type)
-    assert dim is not None, "Unknown geometry type " + \
-        "%s in transform._geom_dimensions." % \
+    assert dim is not None, 'Unknown geometry type ' + \
+        '%s in transform._geom_dimensions.' % \
         repr(g.geom_type)
 
     # recurse for geometry collections to find the true
@@ -1425,10 +1608,10 @@ _default_min_zoom_for_place_kind = {
     'province': 4,
     'state': 4,
 
-    'sea': 3,
+    'sea': 4,
 
     'country': 0,
-    'ocean': 0,
+    'ocean': 1,
     'continent': 0
 }
 
@@ -1865,7 +2048,7 @@ def _make_joined_name(props):
     >>> _make_joined_name(x)
     >>> x
     {'name:right': 'Right', 'name': 'Already Exists', 'name:left': 'Left'}
-    """  # noqa
+    """
 
     # don't overwrite an existing name
     if 'name' in props:
@@ -1876,7 +2059,7 @@ def _make_joined_name(props):
 
     if lname is not None:
         if rname is not None:
-            props['name'] = "%s - %s" % (lname, rname)
+            props['name'] = '%s - %s' % (lname, rname)
         else:
             props['name'] = lname
     elif rname is not None:
@@ -2382,6 +2565,7 @@ def generate_address_points(ctx):
         # address points.
         label_properties = dict(
             addr_housenumber=addr_housenumber,
+            min_zoom=17,
             kind='address')
 
         source = properties.get('source')
@@ -2564,7 +2748,7 @@ def remove_zero_area(shape, properties, fid, zoom):
     # remove the property if it's present. we _only_ want
     # to replace it if it matches the positive, float
     # criteria.
-    area = properties.pop("area", None)
+    area = properties.pop('area', None)
 
     # try to parse a string if the area has been sent as a
     # string. it should come through as a float, though,
@@ -2938,6 +3122,109 @@ def _match_props(props, items_matching):
             return False
 
     return True
+
+
+def keep_n_features_gridded(ctx):
+    """
+    Distribute the features matching _all_ the key-value
+    pairs in `items_matching` into a grid, then keep the
+    first `max_items` features in each grid cell.
+
+    The grid is created by dividing the bounds into cells.
+    The `grid_width_meters` and `grid_height_meters` params
+    specify the width and height (in mercator meters) of
+    each grid cell.
+
+    NOTE: This only works with point features and will
+    pass through non-point features untouched.
+
+    This is useful for removing less-important features
+    in areas that are geographically dense.
+    """
+
+    feature_layers = ctx.feature_layers
+    zoom = ctx.nominal_zoom
+    source_layer = ctx.params.get('source_layer')
+    assert source_layer, 'keep_n_features_gridded: missing source layer'
+    start_zoom = ctx.params.get('start_zoom', 0)
+    end_zoom = ctx.params.get('end_zoom')
+    items_matching = ctx.params.get('items_matching')
+    max_items = ctx.params.get('max_items')
+    grid_width = ctx.params.get('grid_width_meters')
+    # if grid_height_meters is not specified, use grid_width_meters
+    # for grid_height_meters
+    grid_height = ctx.params.get('grid_height_meters') or grid_width
+    sorting_keys = ctx.params.get('sorting_keys')
+
+    # leaving items_matching, grid_size, or max_items as None (or zero)
+    # would mean that this filter would do nothing, so assume
+    # that this is really a configuration error.
+    assert items_matching, 'keep_n_features_gridded: missing or empty item match dict'
+    assert max_items, 'keep_n_features_gridded: missing or zero max number of items'
+    assert grid_width, 'keep_n_features_gridded: missing or zero grid width'
+    assert sorting_keys, 'keep_n_features_gridded: missing sorting keys'
+    assert isinstance(sorting_keys, list), 'keep_n_features_gridded: sorting keys should be a list'
+
+    if zoom < start_zoom:
+        return None
+
+    # we probably don't want to do this at higher zooms (e.g: 17 &
+    # 18), even if there are a bunch of features in the tile, as
+    # we use the high-zoom tiles for overzooming to 20+, and we'd
+    # eventually expect to see _everything_.
+    if end_zoom is not None and zoom >= end_zoom:
+        return None
+
+    layer = _find_layer(feature_layers, source_layer)
+    if layer is None:
+        return None
+
+    minx, miny, maxx, maxy = ctx.unpadded_bounds
+
+    # Sort the features into buckets
+    buckets = defaultdict(list)
+    new_features = []
+    for shape, props, fid in layer['features']:
+        # Pass non-point shapes through untouched
+        if shape.type != 'Point' or not _match_props(props, items_matching):
+            new_features.append((shape, props, fid))
+            continue
+
+        # Calculate the bucket to put this feature in.
+        # Note that this purposefully allows for buckets outside the unpadded bounds
+        # so we can bucketize the padding area, too.
+        bucket_x = int((shape.x - minx) / grid_width)
+        bucket_y = int((shape.y - miny) / grid_height)
+        bucket_id = (bucket_x, bucket_y)
+
+        buckets[bucket_id].append((shape, props, fid))
+
+    def sorting_values_for_feature(f):
+        _, props, _ = f
+
+        values = []
+        for k in sorting_keys:
+            v = props.get(k['sort_key'])
+
+            if v is None:
+                values.append(v)
+                continue
+
+            if k.get('reverse'):
+                v *= -1
+                if v == '':
+                    raise ValueError('Cannot reverse string value %s' % props.get(k['sort_key']))
+
+            values.append(v)
+        return values
+
+    # Sort the features in each bucket and pick the top items to include in the output
+    for features_in_bucket in buckets.values():
+        sorted_features = sorted(features_in_bucket, key=sorting_values_for_feature)
+        new_features.extend(sorted_features[:max_items])
+
+    layer['features'] = new_features
+    return layer
 
 
 def keep_n_features(ctx):
@@ -3533,7 +3820,7 @@ RecursiveMerger = namedtuple('RecursiveMerger', 'leaf node root tolerance')
 
 
 # A bucket used to sort shapes into the next level of the quad tree.
-Bucket = namedtuple("Bucket", "bounds box shapes")
+Bucket = namedtuple('Bucket', 'bounds box shapes')
 
 
 def _mkbucket(*bounds):
@@ -3602,8 +3889,8 @@ def _merge_shapes_recursively(shapes, shapes_per_merge, merger, depth=0,
                 break
         else:
             raise AssertionError(
-                "Expected shape %r to intersect at least one quadrant, but "
-                "intersects none." % (shape.wkt))
+                'Expected shape %r to intersect at least one quadrant, but '
+                'intersects none.' % (shape.wkt))
 
     # recurse if necessary to get below the number of shapes per merge that
     # we want.
@@ -3885,7 +4172,7 @@ def _angle_at(linestring, pt):
         nx = pt
         pt = linestring.coords[-2]
     else:
-        assert False, "Expected point to be first or last"
+        assert False, 'Expected point to be first or last'
 
     if nx == pt:
         return None
@@ -4039,7 +4326,7 @@ def _loop_merge_junctions(geom, angle_tolerance):
             break
 
         assert len(geom.geoms) < mls_size, \
-            "Number of geometries should stay the same or reduce after merge."
+            'Number of geometries should stay the same or reduce after merge.'
 
         # otherwise, keep looping
         mls_size = len(geom.geoms)
@@ -4404,7 +4691,7 @@ def normalize_tourism_kind(shape, properties, fid, zoom):
     main kind.
 
     See https://github.com/mapzen/vector-datasource/issues/440 for more details.
-    """  # noqa
+    """
 
     zoo = properties.pop('zoo', None)
     if zoo is not None:
@@ -4586,7 +4873,7 @@ class _AnyMatcher(object):
         return True
 
     def __repr__(self):
-        return "*"
+        return '*'
 
 
 class _NoneMatcher(object):
@@ -4594,7 +4881,7 @@ class _NoneMatcher(object):
         return other is None
 
     def __repr__(self):
-        return "-"
+        return '-'
 
 
 class _SomeMatcher(object):
@@ -4602,7 +4889,7 @@ class _SomeMatcher(object):
         return other is not None
 
     def __repr__(self):
-        return "+"
+        return '+'
 
 
 class _TrueMatcher(object):
@@ -4610,7 +4897,7 @@ class _TrueMatcher(object):
         return other is True
 
     def __repr__(self):
-        return "true"
+        return 'true'
 
 
 class _ExactMatcher(object):
@@ -4697,7 +4984,7 @@ _KEY_TYPE_LOOKUP = {
 
 
 def _parse_kt(key_type):
-    kt = key_type.split("::")
+    kt = key_type.split('::')
 
     type_key = kt[1] if len(kt) > 1 else None
     fn = _KEY_TYPE_LOOKUP.get(type_key, str)
@@ -4994,9 +5281,9 @@ def drop_small_inners(ctx):
     source_layers = ctx.params.get('source_layers')
 
     assert source_layers, \
-        "You must provide source_layers (layer names) to drop_small_inners"
+        'You must provide source_layers (layer names) to drop_small_inners'
     assert pixel_area, \
-        "You must provide a pixel_area parameter to drop_small_inners"
+        'You must provide a pixel_area parameter to drop_small_inners'
 
     if zoom < start_zoom:
         return None
@@ -5168,31 +5455,31 @@ def simplify_and_clip(ctx):
 
 
 _lookup_operator_rules = {
-                        'United States National Park Service': (
-                            'National Park Service',
-                            'US National Park Service',
-                            'U.S. National Park Service',
-                            'US National Park service'),
-                        'United States Forest Service': (
-                            'US Forest Service',
-                            'U.S. Forest Service',
-                            'USDA Forest Service',
-                            'United States Department of Agriculture',
-                            'US National Forest Service',
-                            'United State Forest Service',
-                            'U.S. National Forest Service'),
-                        'National Parks & Wildife Service NSW': (
-                            'Department of National Parks NSW',
-                            'Dept of NSW National Parks',
-                            'Dept of National Parks NSW',
-                            'Department of National Parks NSW',
-                            'NSW National Parks',
-                            'NSW National Parks & Wildlife Service',
-                            'NSW National Parks and Wildlife Service',
-                            'NSW Parks and Wildlife Service',
-                            'NSW Parks and Wildlife Service (NPWS)',
-                            'National Parks and Wildlife NSW',
-                            'National Parks and Wildlife Service NSW')}
+    'United States National Park Service': (
+        'National Park Service',
+        'US National Park Service',
+        'U.S. National Park Service',
+        'US National Park service'),
+    'United States Forest Service': (
+        'US Forest Service',
+        'U.S. Forest Service',
+        'USDA Forest Service',
+        'United States Department of Agriculture',
+        'US National Forest Service',
+        'United State Forest Service',
+        'U.S. National Forest Service'),
+    'National Parks & Wildife Service NSW': (
+        'Department of National Parks NSW',
+        'Dept of NSW National Parks',
+        'Dept of National Parks NSW',
+        'Department of National Parks NSW',
+        'NSW National Parks',
+        'NSW National Parks & Wildlife Service',
+        'NSW National Parks and Wildlife Service',
+        'NSW Parks and Wildlife Service',
+        'NSW Parks and Wildlife Service (NPWS)',
+        'National Parks and Wildlife NSW',
+        'National Parks and Wildlife Service NSW')}
 
 normalized_operator_lookup = {}
 for normalized_operator, variants in _lookup_operator_rules.items():
@@ -5762,7 +6049,7 @@ def _do_not_backfill(tags):
     return None
 
 
-def _sort_network_us(network, ref):
+def _sort_network_us(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'US:I':
@@ -5791,7 +6078,7 @@ _AU_NETWORK_IMPORTANCE = {
 }
 
 
-def _sort_network_au(network, ref):
+def _sort_network_au(network, ref, osmc_symbol):
     if network is None or \
        not network.startswith('AU:'):
         network_code = 9999
@@ -5803,7 +6090,7 @@ def _sort_network_au(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_br(network, ref):
+def _sort_network_br(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'BR:Trans-Amazonian':
@@ -5816,7 +6103,7 @@ def _sort_network_br(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_ca(network, ref):
+def _sort_network_ca(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'CA:transcanada':
@@ -5831,7 +6118,7 @@ def _sort_network_ca(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_ch(network, ref):
+def _sort_network_ch(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'CH:national':
@@ -5848,7 +6135,7 @@ def _sort_network_ch(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_cn(network, ref):
+def _sort_network_cn(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'CN:expressway':
@@ -5867,7 +6154,7 @@ def _sort_network_cn(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_es(network, ref):
+def _sort_network_es(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'ES:A-road':
@@ -5890,7 +6177,7 @@ def _sort_network_es(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_fr(network, ref):
+def _sort_network_fr(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'FR:A-road':
@@ -5911,7 +6198,7 @@ def _sort_network_fr(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_de(network, ref):
+def _sort_network_de(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'DE:BAB':
@@ -5936,7 +6223,7 @@ def _sort_network_de(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_ga(network, ref):
+def _sort_network_ga(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'GA:national':
@@ -5951,7 +6238,7 @@ def _sort_network_ga(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_gr(network, ref):
+def _sort_network_gr(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'GR:motorway':
@@ -5968,7 +6255,7 @@ def _sort_network_gr(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_in(network, ref):
+def _sort_network_in(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'IN:NH':
@@ -5985,7 +6272,7 @@ def _sort_network_in(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_ir(network, ref):
+def _sort_network_ir(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'AsianHighway':
@@ -5998,7 +6285,7 @@ def _sort_network_ir(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_kz(network, ref):
+def _sort_network_kz(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'KZ:national':
@@ -6017,7 +6304,7 @@ def _sort_network_kz(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_la(network, ref):
+def _sort_network_la(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'LA:national':
@@ -6032,7 +6319,7 @@ def _sort_network_la(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_mx(network, ref):
+def _sort_network_mx(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'MX:MEX':
@@ -6045,7 +6332,7 @@ def _sort_network_mx(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_my(network, ref):
+def _sort_network_my(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'MY:federal':
@@ -6062,7 +6349,7 @@ def _sort_network_my(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_no(network, ref):
+def _sort_network_no(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'NO:oslo:ring':
@@ -6081,7 +6368,7 @@ def _sort_network_no(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_gb(network, ref):
+def _sort_network_gb(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'GB:M-road':
@@ -6102,7 +6389,7 @@ def _sort_network_gb(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_pl(network, ref):
+def _sort_network_pl(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'PL:motorway':
@@ -6121,7 +6408,7 @@ def _sort_network_pl(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_pt(network, ref):
+def _sort_network_pt(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'PT:motorway':
@@ -6150,7 +6437,7 @@ def _sort_network_pt(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_ro(network, ref):
+def _sort_network_ro(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'RO:motorway':
@@ -6171,7 +6458,7 @@ def _sort_network_ro(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_ru(network, ref):
+def _sort_network_ru(network, ref, osmc_symbol):
     ref = _make_unicode_or_none(ref)
 
     if network is None:
@@ -6202,7 +6489,7 @@ def _sort_network_ru(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_tr(network, ref):
+def _sort_network_tr(network, ref, osmc_symbol):
     ref = _make_unicode_or_none(ref)
 
     if network is None:
@@ -6235,7 +6522,7 @@ def _sort_network_tr(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_ua(network, ref):
+def _sort_network_ua(network, ref, osmc_symbol):
     ref = _make_unicode_or_none(ref)
 
     if network is None:
@@ -6261,7 +6548,7 @@ def _sort_network_ua(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_vn(network, ref):
+def _sort_network_vn(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'VN:expressway':
@@ -6285,7 +6572,7 @@ def _sort_network_vn(network, ref):
     return network_code * 10000 + min(ref, 9999)
 
 
-def _sort_network_za(network, ref):
+def _sort_network_za(network, ref, osmc_symbol):
     if network is None:
         network_code = 9999
     elif network == 'ZA:national':
@@ -7651,6 +7938,8 @@ def merge_networks_from_tags(shape, props, fid, zoom):
 
     network = props.get('network')
     ref = props.get('ref')
+    osmc_symbol = props.get('osmc:symbol')
+
     mz_networks = props.get('mz_networks', [])
     country_code = props.get('country_code')
 
@@ -7660,8 +7949,8 @@ def merge_networks_from_tags(shape, props, fid, zoom):
     #  * if they begin with two letters and a dash, then make the letters upper
     #    case and replace the dash with a colon.
     #  * expand ;-delimited lists in refs
-    for i in xrange(0, len(mz_networks), 3):
-        t, n, r = mz_networks[i:i+3]
+    for i in xrange(0, len(mz_networks), 4):
+        t, n, r, o = mz_networks[i:i+4]
         if t == 'road' and n is not None:
             n = _fixup_network_country_code(n)
             mz_networks[i+1] = n
@@ -7669,7 +7958,7 @@ def merge_networks_from_tags(shape, props, fid, zoom):
             refs = r.split(';')
             mz_networks[i+2] = refs.pop()
             for new_ref in refs:
-                mz_networks.extend((t, n, new_ref))
+                mz_networks.extend((t, n, new_ref, o))
 
     # for road networks, if there's no explicit network, but the country code
     # and ref are both available, then try to use them to back-fill the
@@ -7685,8 +7974,8 @@ def merge_networks_from_tags(shape, props, fid, zoom):
         # then use the network from the relation instead.
         if network is None:
             solo_networks_from_relations = []
-            for i in xrange(0, len(mz_networks), 3):
-                t, n, r = mz_networks[i:i+3]
+            for i in xrange(0, len(mz_networks), 4):
+                t, n, r, o = mz_networks[i:i+4]
                 if t == 'road' and n and (r is None or r == ref):
                     solo_networks_from_relations.append((n, i))
 
@@ -7699,7 +7988,7 @@ def merge_networks_from_tags(shape, props, fid, zoom):
                 # add network back into properties in case we need to pass it
                 # to the backfill.
                 props['network'] = network
-                del mz_networks[i:i+3]
+                del mz_networks[i:i+4]
 
         if logic and logic.backfill:
             networks_and_refs = logic.backfill(props) or []
@@ -7726,8 +8015,8 @@ def merge_networks_from_tags(shape, props, fid, zoom):
             # an entry in mz_networks with the same ref!
             if ref:
                 found = False
-                for i in xrange(0, len(mz_networks), 3):
-                    t, _, r = mz_networks[i:i+3]
+                for i in xrange(0, len(mz_networks), 4):
+                    t, _, r, _ = mz_networks[i:i+4]
                     if t == 'road' and r == ref:
                         found = True
                         break
@@ -7746,7 +8035,7 @@ def merge_networks_from_tags(shape, props, fid, zoom):
     if network and ref:
         props.pop('network', None)
         props.pop('ref')
-        mz_networks.extend([_guess_type_from_network(network), network, ref])
+        mz_networks.extend([_guess_type_from_network(network), network, ref, osmc_symbol])
 
     if mz_networks:
         props['mz_networks'] = mz_networks
@@ -7759,7 +8048,7 @@ def merge_networks_from_tags(shape, props, fid, zoom):
 _ANY_NUMBER = re.compile('[^0-9]*([0-9]+)')
 
 
-def _default_sort_network(network, ref):
+def _default_sort_network(network, ref, osmc_symbol):
     """
     Returns an integer representing the numeric importance of the network,
     where lower numbers are more important.
@@ -7826,15 +8115,15 @@ def _generic_network_importance(network, ref, codes):
     return code * 10000 + min(ref, 9999)
 
 
-def _walking_network_importance(network, ref):
+def _walking_network_importance(network, ref, osmc_symbol):
     return _generic_network_importance(network, ref, _WALKING_NETWORK_CODES)
 
 
-def _bicycle_network_importance(network, ref):
+def _bicycle_network_importance(network, ref, osmc_symbol):
     return _generic_network_importance(network, ref, _BICYCLE_NETWORK_CODES)
 
 
-def _bus_network_importance(network, ref):
+def _bus_network_importance(network, ref, osmc_symbol):
     return _generic_network_importance(network, ref, {})
 
 
@@ -7966,14 +8255,15 @@ def extract_network_information(shape, properties, fid, zoom):
         itr = iter(mz_networks)
 
         groups = defaultdict(list)
-        for (type, network, ref) in zip(itr, itr, itr):
+        for (type, network, ref, osmc_symbol) in zip(itr, itr, itr, itr):
             n = _NETWORKS.get(type)
             if n:
-                groups[n].append([network, ref])
+                groups[n].append([network, ref, osmc_symbol])
 
         for network, vals in groups.items():
             all_networks = 'all_' + network.prefix + 'networks'
             all_shield_texts = 'all_' + network.prefix + 'shield_texts'
+            all_osmc_symbols = 'all_' + network.prefix + 'osmc_symbols'
 
             shield_text_fn = network.shield_text_fn
             if network is _ROAD_NETWORK and country_logic and \
@@ -7982,7 +8272,8 @@ def extract_network_information(shape, properties, fid, zoom):
 
             shield_texts = list()
             network_names = list()
-            for network_name, ref in vals:
+            osmc_symbols = list()
+            for network_name, ref, osmc_symbol in vals:
                 network_names.append(network_name)
 
                 ref = _make_unicode_or_none(ref)
@@ -7996,9 +8287,11 @@ def extract_network_information(shape, properties, fid, zoom):
                     ref = ref.encode('utf-8')
 
                 shield_texts.append(ref)
+                osmc_symbols.append(osmc_symbol)
 
             properties[all_networks] = network_names
             properties[all_shield_texts] = shield_texts
+            properties[all_osmc_symbols] = osmc_symbols
 
     return (shape, properties, fid)
 
@@ -8011,16 +8304,18 @@ def _choose_most_important_network(properties, prefix, importance_fn):
 
     all_networks = 'all_' + prefix + 'networks'
     all_shield_texts = 'all_' + prefix + 'shield_texts'
+    all_osmc_symbols = 'all_' + prefix + 'osmc_symbols'
 
     networks = properties.pop(all_networks, None)
     shield_texts = properties.pop(all_shield_texts, None)
+    osmc_symbols = properties.pop(all_osmc_symbols, None)
     country_code = properties.get('country_code')
 
-    if networks and shield_texts:
+    if networks and shield_texts and osmc_symbols:
         def network_key(t):
             return importance_fn(*t)
 
-        tuples = sorted(set(zip(networks, shield_texts)), key=network_key)
+        tuples = sorted(set(zip(networks, shield_texts, osmc_symbols)), key=network_key)
 
         # i think most route designers would try pretty hard to make sure that
         # a segment of road isn't on two routes of different networks but with
@@ -8030,27 +8325,44 @@ def _choose_most_important_network(properties, prefix, importance_fn):
         # with the same ref (and network != none).
         seen_ref = set()
         new_tuples = []
-        for network, ref in tuples:
+        for network, ref, osmc_symbol in tuples:
             if network:
                 if ref:
                     seen_ref.add(ref)
-                new_tuples.append((network, ref))
+                new_tuples.append((network, ref, osmc_symbol))
 
             elif ref is not None and ref not in seen_ref:
                 # network is None, fall back to the country code
-                new_tuples.append((country_code, ref))
+                new_tuples.append((country_code, ref, osmc_symbol))
 
         tuples = new_tuples
 
         if tuples:
             # expose first network as network/shield_text
-            network, ref = tuples[0]
+            network, ref, osmc_symbol = tuples[0]
             properties[prefix + 'network'] = network
             properties[prefix + 'shield_text'] = ref
+            properties[prefix + 'osmc_symbol'] = osmc_symbol
+
+            if ref is not None:
+                properties[prefix + 'shield_text'] = ref
+                if 0 < len(ref) <= 7:
+                    properties[prefix + 'shield_text_length'] = str(len(ref))
 
             # replace properties with sorted versions of themselves
             properties[all_networks] = [n[0] for n in tuples]
             properties[all_shield_texts] = [n[1] for n in tuples]
+            properties[all_osmc_symbols] = [n[2] for n in tuples]
+
+            properties[all_osmc_symbols + '_str'] = ''
+
+            if properties[all_osmc_symbols] is not None:
+                for x in properties[all_osmc_symbols]:
+                    if x is not None:
+                        properties[all_osmc_symbols + '_str'] += ("," if properties[all_osmc_symbols + '_str'] != '' else '') + x
+                    else:
+                        properties[all_osmc_symbols + '_str'] += ("," if properties[all_osmc_symbols + '_str'] != '' else '')
+
 
     return properties
 
@@ -8114,6 +8426,7 @@ def buildings_unify(ctx):
             if building_id:
                 indexed_building = geom_with_building_id(shape, building_id)
                 indexable_buildings.append(indexed_building)
+                props['root_id'] = building_id
         elif kind == 'building_part':
             parts.append(feature)
 
@@ -8178,13 +8491,13 @@ class Palette(object):
         self.namelookup = dict()
         for name, colour in colours.items():
             assert len(colour) == 3, \
-                "Colours must lists of be of length 3 (%r: %r)" % \
+                'Colours must lists of be of length 3 (%r: %r)' % \
                 (name, colour)
             for val in colour:
                 assert isinstance(val, int), \
-                    "Colour values must be integers (%r: %r)" % (name, colour)
+                    'Colour values must be integers (%r: %r)' % (name, colour)
                 assert val >= 0 and val <= 255, \
-                    "Colour values must be between 0 and 255 (%r: %r)" % \
+                    'Colour values must be between 0 and 255 (%r: %r)' % \
                     (name, colour)
             self.namelookup[tuple(colour)] = name
         self.tree = kdtree.create(colours.values())
@@ -8326,10 +8639,10 @@ def _fixup_country_specific_networks(shape, props, fid, zoom):
         # mz_networks is a list of repeated [type, network, ref, ...], it isn't
         # nested!
         itr = iter(mz_networks)
-        for (type, network, ref) in zip(itr, itr, itr):
+        for (type, network, ref, osmc_symbol) in zip(itr, itr, itr, itr):
             if type == 'road':
                 network, ref = logic.fix(network, ref)
-            new_networks.extend([type, network, ref])
+            new_networks.extend([type, network, ref, osmc_symbol])
 
         props['mz_networks'] = new_networks
 
@@ -8536,6 +8849,66 @@ def min_zoom_filter(ctx):
     return None
 
 
+def tags_set_ne_pop_min_max_default(ctx):
+    """
+    The data may potentially a join result of OSM and NE so there are different
+    scenarios when we populate the population and population_rank fields.
+
+    population:
+    (1) if the data has population from OSM use it as is
+    (2) if the data has no population from OSM, use __ne_pop_min to back-fill
+    (3) if the data has no population from OSM and no __ne_pop_min from NE
+    either(no OSM<>NE join or NE just don't have non-nil __ne_pop_min value),
+    then use the estimate value to back-fill based its kind_detail
+
+    population_rank:
+    (1) if the data has __ne_pop_max, use it to calculate population_rank
+    (2) if the data doesn't have __ne_pop_max(no OSM<>NE join or NE just don't
+    have non-nil __ne_pop_max value) use the population value determined by the
+    above procedure to calculate it.
+    """
+    params = _Params(ctx, 'tags_set_ne_pop_min_max')
+    layer_name = params.required('layer')
+    layer = _find_layer(ctx.feature_layers, layer_name)
+
+    for _, props, _ in layer['features']:
+        __ne_pop_min = props.pop('__ne_pop_min', None)
+        __ne_pop_max = props.pop('__ne_pop_max', None)
+
+        population = props.get('population')
+
+        if population is None:
+            population = __ne_pop_min
+        if population is None:
+            kind = props.get('kind')
+            kind_detail = props.get('kind_detail')
+            # the following are estimate population for each kind_detail
+            if kind == 'locality':
+                if kind_detail == 'city':
+                    population = 10000
+                elif kind_detail == 'town':
+                    population = 5000
+                elif kind_detail == 'village':
+                    population = 2000
+                elif kind_detail == 'locality':
+                    population = 1000
+                elif kind_detail == 'hamlet':
+                    population = 200
+                elif kind_detail == 'isolated_dwelling':
+                    population = 100
+                elif kind_detail == 'farm':
+                    population = 50
+
+        population = to_float(population)
+        if population is not None:
+            props['population'] = int(population)
+        if __ne_pop_max is not None:
+            props['population_rank'] = _calculate_population_rank(__ne_pop_max)
+        elif population is not None:
+            props['population_rank'] = \
+                _calculate_population_rank(props['population'])
+
+
 def tags_set_ne_min_max_zoom(ctx):
     """
     Override the min zoom and max zoom properties with __ne_* variants from
@@ -8556,13 +8929,14 @@ def tags_set_ne_min_max_zoom(ctx):
                 min_zoom = ceil(min_zoom)
             props['min_zoom'] = min_zoom
 
-        elif props.get('kind') == 'country':
+        elif props.get('kind') in ('country', 'unrecognized'):
             # countries and regions which don't have a min zoom joined from NE
             # are probably either vandalism or unrecognised countries. either
             # way, we probably don't want to see them at zoom, which is lower
             # than most of the curated NE min zooms. see issue #1826 for more
             # information.
-            props['min_zoom'] = max(6, props['min_zoom'])
+            props['kind'] = 'unrecognized'
+            props['min_zoom'] = max(8, props['min_zoom'])
 
         elif props.get('kind') == 'region':
             props['min_zoom'] = max(8, props['min_zoom'])
@@ -8765,8 +9139,8 @@ def add_vehicle_restrictions(shape, props, fid, zoom):
     def _one_dp(val, unit):
         deci = int(floor(10 * val))
         if deci % 10 == 0:
-            return "%d%s" % (deci / 10, unit)
-        return "%.1f%s" % (0.1 * deci, unit)
+            return '%d%s' % (deci / 10, unit)
+        return '%.1f%s' % (0.1 * deci, unit)
 
     def _metres(val):
         # parse metres or feet and inches, return cm
@@ -8819,6 +9193,8 @@ def add_vehicle_restrictions(shape, props, fid, zoom):
         props['hgv_restriction'] = hgv_restriction
     if hgv_restriction_shield_text:
         props['hgv_restriction_shield_text'] = hgv_restriction_shield_text
+        if 0 < len(hgv_restriction_shield_text) < 7:
+            props['hgv_restriction_shield_text_length'] = str(len(hgv_restriction_shield_text))
 
     return shape, props, fid
 
@@ -8916,10 +9292,10 @@ def remap_viewpoint_kinds(shape, props, fid, zoom):
     Remap Natural Earth kinds in kind:* country viewpoints into the standard
     Tilezen nomenclature.
     """
-
     for key in props.keys():
-        if key.startswith('kind:'):
-            props[key] = _REMAP_VIEWPOINT_KIND.get(props[key])
+
+        if key.startswith('kind:') and props[key] in _REMAP_VIEWPOINT_KIND:
+            props[key] = _REMAP_VIEWPOINT_KIND[props[key]]
 
     return (shape, props, fid)
 
@@ -8943,7 +9319,7 @@ def _list_of_countries(value):
         # should have an ISO 3166-1 alpha-2 code, so should be 2 ASCII
         # latin characters.
         candidate = candidate.strip().lower()
-        if candidate == 'iso' or match('[a-z][a-z]', candidate):
+        if candidate == 'iso' or candidate == 'tlc' or match('[a-z][a-z]', candidate):
             countries.append(candidate)
 
     return countries
@@ -8951,7 +9327,7 @@ def _list_of_countries(value):
 
 def unpack_viewpoint_claims(shape, props, fid, zoom):
     """
-    Unpack OSM "claimed_by" list into viewpoint kinds.
+    Unpack OSM "claimed_by" and "disputed_by" lists into viewpoint kinds.
 
     For example; "claimed_by=AA;BB;CC" should become "kind:aa=country,
     kind:bb=country, kind:cc=country" (or region, etc... as appropriate for
@@ -8962,22 +9338,27 @@ def unpack_viewpoint_claims(shape, props, fid, zoom):
     see it in their viewpoint as a country/region/county.
     """
 
-    prefix = 'unrecognized_'
-    kind = props.get('kind')
-    claimed_by = props.get('claimed_by')
-    recognized_by = props.get('recognized_by')
+    claimed_by = props.get('claimed_by', '')
+    recognized_by = props.get('recognized_by', '')
+    disputed_by = props.get('disputed_by', '')
 
-    if kind and kind.startswith(prefix) and claimed_by:
-        claimed_kind = kind[len(prefix):]
+    admin_level = str(props.get('tz_admin_level', ''))
 
-        for country in _list_of_countries(claimed_by):
-            props['kind:' + country] = claimed_kind
+    if admin_level:
+        base_kind = _ADMIN_LEVEL_TO_KIND.get(admin_level, '')
+        if not base_kind:
+            base_kind = 'debug'
 
-        if recognized_by:
-            for viewpoint in _list_of_countries(recognized_by):
-                props['kind:' + viewpoint] = claimed_kind
+        for viewpoint in _list_of_countries(claimed_by):
+            props['kind:' + viewpoint] = base_kind
 
-    return (shape, props, fid)
+        for viewpoint in _list_of_countries(recognized_by):
+            props['kind:' + viewpoint] = base_kind
+
+        for viewpoint in _list_of_countries(disputed_by):
+            props['kind:' + viewpoint] = 'unrecognized'
+
+    return shape, props, fid
 
 
 class _DisputeMasks(object):
@@ -9001,13 +9382,16 @@ class _DisputeMasks(object):
         disputed_by = props.get('disputed_by', '')
         disputants = _list_of_countries(disputed_by)
 
+        recognizants = _list_of_countries(props.get('recognized_by', ''))
+        claimants = _list_of_countries(props.get('claimed_by', ''))
+
         if disputants:
             # we use a flat cap to avoid straying too much into nearby lines
             # and a mitred join to avoid creating extra geometry points to
             # represent the curve, as this slows down intersection checks.
             buffered_shape = shape.buffer(
                 self.buffer_distance, CAP_STYLE.flat, JOIN_STYLE.mitre)
-            self.masks.append((buffered_shape, disputants))
+            self.masks.append((buffered_shape, disputants, recognizants, claimants, props))
 
     def empty(self):
         return not self.masks
@@ -9020,15 +9404,7 @@ class _DisputeMasks(object):
 
         updated_features = []
 
-        # figure out what we want the boundary kind to be, if it's intersected
-        # with the dispute mask.
-        kind = props['kind']
-        if kind.startswith('unrecognized_'):
-            unrecognized = kind
-        else:
-            unrecognized = 'unrecognized_' + kind
-
-        for mask_shape, disputants in self.masks:
+        for mask_shape, disputants, recognizants, claimants, dispute_props in self.masks:
             # we don't want to override a kind:xx if it has already been set
             # (e.g: by a claim), so we filter out disputant viewpoints where
             # a kind override has already been set.
@@ -9051,7 +9427,21 @@ class _DisputeMasks(object):
                 if not cut_shape.is_empty:
                     new_props = props.copy()
                     for disputant in non_claim_disputants:
-                        new_props['kind:' + disputant] = unrecognized
+                        new_props['kind:' + disputant] = 'unrecognized'
+
+                    for recognizant in recognizants:
+                        new_props['kind:' + recognizant] = 'country'
+
+                    for claimant in claimants:
+                        new_props['kind:' + claimant] = 'country'
+
+                    new_props['kind'] = 'disputed_reference_line'
+
+                    # apply all the properties that aren't already there from the dispute feature
+                    for prop, value in dispute_props.items():
+                        if not new_props.get(prop):
+                            new_props[prop] = value
+
                     updated_features.append((cut_shape, new_props, None))
 
         if not shape.is_empty:
@@ -9120,9 +9510,9 @@ def apply_disputed_boundary_viewpoints(ctx):
         # we want to apply disputes to already generally-unrecognised borders
         # too, as this allows for multi-level fallback from one viewpoint
         # possibly through several others before reaching the default.
-        elif (kind.startswith('unrecognized_') and
-              kind[len('unrecognized_'):] in _BOUNDARY_KINDS):
-            boundaries.append((shape, props, fid))
+        elif kind.startswith('unrecognized_'):
+            if kind[len('unrecognized_'):] in _BOUNDARY_KINDS:
+                boundaries.append((shape, props, fid))
 
         else:
             # pass through this feature - we just ignore it.
@@ -9182,6 +9572,9 @@ def update_min_zoom(ctx):
         local = defaultdict(lambda: None)
         local.update(props)
         local['zoom'] = zoom
+        # this is to make the name `properties` visible in the queries.yaml's
+        # where clause
+        local['properties'] = props
 
         if where and eval(where, {}, local):
             new_min_zoom = eval(min_zoom, {}, local)
@@ -9269,3 +9662,163 @@ def capital_alternate_viewpoint(shape, props, fid, zoom):
                 props['region_capital:' + viewpoint] = False
 
     return shape, props, fid
+
+
+# Map admin level to the kind it should become. Admin_level 3 isn't a widely recognized country,
+# but the only uses of 3 we care about are when it is a country from some viewpoint
+# Similarly 5 is typically used for disputed regions.
+_ADMIN_LEVEL_TO_KIND = {'2': 'country',
+                        '4': 'region',
+                        '6': 'county',
+                        '8': 'locality'}
+
+_PLACE_TO_KIND = {'country': 'country',
+                  'region': 'region',
+                  'state': 'region',
+                  'province': 'region',
+                  'county': 'county',
+                  'district': 'county',
+                  'city': 'locality',
+                  'town': 'locality',
+                  'village': 'locality',
+                  'locality': 'locality',
+                  'hamlet': 'locality',
+                  'isolated_dwelling': 'locality',
+                  'farm': 'locality',
+                  }
+
+
+def admin_level_alternate_viewpoint(shape, props, fid, zoom):
+    """
+    turns e.g. admin_level:XX=4 into kind:xx=region
+    """
+    admin_viewpoint_prefix = 'admin_level:'
+    tags = props.get('tags', {})
+
+    for k in tags.keys():
+        if k.startswith(admin_viewpoint_prefix):
+            viewpoint = k[len(admin_viewpoint_prefix):].lower()
+            admin_level = tags.pop(k)
+
+            # use a mapping if we have it, leave it out otherwise
+            if admin_level in _ADMIN_LEVEL_TO_KIND:
+                props['kind:' + viewpoint] = _ADMIN_LEVEL_TO_KIND.get(admin_level, None)
+
+    return shape, props, fid
+
+
+def unpack_places_disputes(shape, props, fid, zoom):
+    """
+    turns disputed places into 'unrecognized' for that viewpoint
+    """
+    disputed_by = props.pop('disputed_by', '')
+    disputants = _list_of_countries(disputed_by)
+
+    for disputant in disputants:
+        props['kind:' + disputant] = 'unrecognized'
+
+    return shape, props, fid
+
+
+def apply_places_with_viewpoints(shape, props, fid, zoom):
+    """
+    turns a valid place:XX into a corresponding kind:xx
+    """
+    prefix = 'place:'
+
+    for prop, value in list(props.items()):
+        if not prop.startswith(prefix):
+            continue
+
+        viewpoint = prop[len(prefix):].strip().lower()
+        kind = _PLACE_TO_KIND.get(value.strip().lower(), '')
+        if not kind:
+            continue
+
+        props['kind:' + viewpoint] = kind
+        props.pop(prop)
+
+    return shape, props, fid
+
+
+def create_dispute_ids(shape, props, fid, zoom):
+    """
+    concatenate <breakaway_code>_<ne_id> and store in dispute_id.  Just use what's there
+    stores no dispute_id if both input fields are missing
+    """
+
+    breakaway_code = props.pop('tz_breakaway_code', None)
+    if breakaway_code is None:
+        # no breakaway code, not a dispute
+        return shape, props, fid
+    items = [breakaway_code]
+
+    ne_id = props.pop('tz_ne_id', None)
+    if ne_id is not None:
+        items.append(str(ne_id))
+
+    dispute_id = '_'.join(items)
+    if dispute_id:
+        props['dispute_id'] = dispute_id
+
+    return shape, props, fid
+
+
+def override_with_ne_names(shape, props, fid, zoom):
+    """
+    Override the name:xx properties with __ne_* variants from
+    Natural Earth, if there are any.
+    """
+
+    name_prefix = '__ne_name_'
+
+    for k in props.keys():
+        if k.startswith(name_prefix):
+            language = k[len(name_prefix):]
+            ne_name = props.pop(k)
+
+            if len(ne_name) > 0:
+                props['name:' + language] = ne_name
+
+    return shape, props, fid
+
+
+def mutate(ctx):
+    """
+    We take a layer and we modify the geometry using the python expression in the query. The expressions have access to
+    both the existing shape and existing properties via python string format replacements {shape} and {properties}
+    respectively. Each expression is then eval'd to replace the existing feature in the layer with the result of the
+    expressions. By default the expressions are a no-op
+    """
+
+    layer = ctx.params.get('layer')
+    assert layer, 'regenerate_geometry: missing layer'
+    geometry_expression = ctx.params.get('geometry_expression', '{shape}')
+    properties_expression = ctx.params.get('properties_expression', '{properties}')
+    assert geometry_expression or properties_expression, \
+        'mutate: requires at least one geometry or properties expression'
+    geometry_expression = geometry_expression.format(shape='shape', properties='props')
+    properties_expression = properties_expression.format(shape='shape', properties='props')
+
+    zoom = ctx.nominal_zoom
+    start_zoom = ctx.params.get('start_zoom', 0)
+    end_zoom = ctx.params.get('end_zoom')
+    if zoom < start_zoom:
+        return None
+    if end_zoom is not None and zoom >= end_zoom:
+        return None
+
+    # for the max zoom a transform needs to be re-entrant so we take a copy here
+    layer = copy.deepcopy(_find_layer(ctx.feature_layers, layer))
+    if layer is None:
+        return None
+
+    new_features = []
+    for feature in layer['features']:
+        shape, props, fid = feature
+        shape = eval(geometry_expression)
+        props = eval(properties_expression)
+        new_features.append((shape, props, fid))
+
+    layer['features'] = new_features
+    return layer

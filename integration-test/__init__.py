@@ -49,6 +49,8 @@ from vectordatasource.meta.python import output_min_zoom
 from vectordatasource.meta.python import parse_layers
 
 
+BROKEN = 'Test failed please fix and re-enable'
+
 # the Overpass server is used to download data about OSM elements. the
 # environment allows us to override the default public Overpass server to take
 # the load off it.
