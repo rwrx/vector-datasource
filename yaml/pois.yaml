@@ -21,6 +21,8 @@ global:
     exit_to: {col: exit_to}
     wikidata_id: {col: wikidata}
     direction: {col: direction}
+    memorial: {col: memorial}
+    information: {col: information}
   - &transit_properties
     mz_transit_score: {col: mz_transit_score}
     mz_transit_root_relation_id: {col: mz_transit_root_relation_id}
