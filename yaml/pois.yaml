@@ -1397,9 +1397,23 @@ filters:
       kind: battlefield
 
   - filter:
-      any:
-        natural: [peak, volcano]
-        information: guidepost
+      information: guidepost
+    min_zoom:
+      lookup:
+        key: { call: { func: mz_to_float_meters, args: [ { col: ele } ] } }
+        op: '>='
+        table:
+          - [ 9,  4000 ]
+          - [ 10, 3000 ]
+          - [ 11, 2000 ]
+          - [ 12, 1000 ]
+        default: 13
+    output:
+      <<: *output_properties
+      kind: information
+      elevation: {col: ele}
+  - filter:
+      natural: [peak, volcano]
     min_zoom:
       lookup:
         key: { call: { func: mz_to_float_meters, args: [ { col: ele } ] } }
