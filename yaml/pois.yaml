@@ -23,6 +23,7 @@ global:
     direction: {col: direction}
     memorial: {col: memorial}
     information: {col: information}
+    diplomatic: {col: diplomatic}
   - &transit_properties
     mz_transit_score: {col: mz_transit_score}
     mz_transit_root_relation_id: {col: mz_transit_root_relation_id}
@@ -1396,6 +1397,22 @@ filters:
       kind: battlefield
 
   - filter:
+      information: guidepost
+    min_zoom:
+      lookup:
+        key: { call: { func: mz_to_float_meters, args: [ { col: ele } ] } }
+        op: '>='
+        table:
+          - [ 9,  4000 ]
+          - [ 10, 3000 ]
+          - [ 11, 2000 ]
+          - [ 12, 1000 ]
+        default: 13
+    output:
+      <<: *output_properties
+      kind: information
+      elevation: {col: ele}
+  - filter:
       natural: [peak, volcano]
     min_zoom:
       lookup:
@@ -2202,7 +2219,7 @@ filters:
       <<: *output_properties
       kind: {col: amenity}
   - filter:
-      amenity: [atm, post_box, telephone]
+      amenity: [atm, clock, coffee, drinks, driving_school, excrement_bags, internet_cafe, milk, monastery, parcel_locker, parking_entrance, parking_tickets, post_box, public_bath, public_bookcase, public_transport_tickets, telephone]
     min_zoom: 18
     output:
       <<: *output_properties
@@ -2242,6 +2259,12 @@ filters:
     output:
       <<: *output_properties
       kind: memorial
+  # monastery
+  - filter: {historic: monastery}
+    min_zoom: 16
+    output:
+      <<: *output_properties
+      kind: monastery
   # slipway with mooring info
   - filter:
       leisure: slipway
@@ -2269,7 +2292,7 @@ filters:
       kind: defibrillator
   - filter:
       office: [accountant, administrative, advertising_agency, architect, association,
-        company, consulting, educational_institution, employment_agency, estate_agent,
+        company, consulting, diplomatic, educational_institution, employment_agency, estate_agent,
         financial, foundation, government, insurance, it, lawyer, newspaper, ngo, notary,
         physician, political_party, religion, research, tax_advisor, telecommunication,
         therapist, travel_agent]
@@ -2365,17 +2388,25 @@ filters:
   - filter:
       shop:
         - art
+        - bag
         - bakery
         - beauty
+        - bed
+        - beverages
         - bookmaker
         - books
         - butcher
         - car
         - car_parts
         - car_repair
+        - carpet
+        - chocolate
         - clothes
         - computer
+        - confectionery
         - convenience
+        - diary
+        - fabric
         - fashion
         - florist
         - garden_centre
@@ -2385,16 +2416,29 @@ filters:
         - grocery
         - hairdresser
         - hifi
+        - houseware
+        - interior_decoration
         - jewelry
         - lottery
+        - massage
+        - medical_supply
         - mobile_phone
+        - musical_instrument
         - newsagent
         - optician
+        - paint
+        - pastry
         - perfumery
+        - seafood
+        - second_hand
         - ship_chandler
         - stationery
+        - tea
+        - ticket
         - tobacco
         - travel_agency
+        - video_games
+        - wholesale
     min_zoom: 17
     output:
       <<: *output_properties
