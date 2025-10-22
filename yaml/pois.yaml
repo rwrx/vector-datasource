@@ -421,6 +421,7 @@ global:
           - taxi
           - telephone
           - toilets
+          - vending_machine
           - waste_basket
           - waste_disposal
           - water_point
@@ -439,19 +440,25 @@ global:
           - swing_gate
           - toll_booth
         - emergency:
+          - access_point
+          - assembly_point
           - defibrillator
           - fire_hydrant
+          - landing_site
+          - lifeguard
           - lifeguard_tower
+          - life_ring
+          - mountain_rescue
           - phone
         - harbour: harbour_master
         - highway: [ bus_stop, elevator, ford, turning_circle, turning_loop, mini_roundabout, motorway_junction, platform,
             rest_area, street_lamp, traffic_signals, trailhead ]
         - historic: [landmark, wayside_cross]
         - landuse: quarry
-        - leisure: [ dog_park, firepit, fishing, pitch, playground, slipway, swimming_area ]
+        - leisure: [ amusement_arcade, bird_hide, bowling_alley, dance, dog_park, firepit, fishing, ice_rink, outdoor_seating, picnic_table, pitch, playground, sauna, slipway, swimming_area ]
         - lock: yes
-        - man_made: [ adit, communications_tower, chimney, crane, mast, mineshaft, obelisk, observatory,
-            offshore_platform, petroleum_well, power_wind, telescope, water_tower,
+        - man_made: [ adit, communications_tower, chimney, crane, mast, mineshaft, monitoring_station, obelisk, observatory,
+            offshore_platform, petroleum_well, power_wind, telescope, tower, water_tower,
             water_well, watermill, windmill ]
         - military: bunker
         - mooring: true
@@ -1509,6 +1516,7 @@ filters:
     output:
       <<: *output_properties
       kind: {col: craft}
+      kind_detail: craft
   - filter:
       shop: [charity, chemist, cosmetics, fishmonger, furniture, golf, pet, shoes, variety_store]
     min_zoom: { clamp: { min: 13, max: 17, value: { sum: [ { col: zoom }, 3.3 ] } } }
@@ -2447,6 +2455,7 @@ filters:
     output:
       <<: *output_properties
       kind: {col: shop}
+      kind_detail: shop
   - filter: # These are lower priority than the shops above
       amenity: [car_wash, hunting_stand]
     min_zoom: 17
@@ -2471,7 +2480,7 @@ filters:
       <<: [*output_properties, *transit_properties]
       kind: subway_entrance
   - filter:
-      amenity: [bench, waste_basket]
+      amenity: [bench, vending_machine, waste_basket]
     min_zoom: 18
     output:
       <<: *output_properties
@@ -2703,6 +2712,41 @@ filters:
     output:
       <<: *output_properties
       kind: swimming_area
+  - filter: {leisure: outdoor_seating}
+    min_zoom: 18
+    output:
+      <<: *output_properties
+      kind: outdoor_seating
+  - filter: {leisure: sauna}
+    min_zoom: 18
+    output:
+      <<: *output_properties
+      kind: sauna
+  - filter: {leisure: amusement_arcade}
+    min_zoom: 18
+    output:
+      <<: *output_properties
+      kind: amusement_arcade
+  - filter: {leisure: bird_hide}
+    min_zoom: 18
+    output:
+      <<: *output_properties
+      kind: bird_hide
+  - filter: {leisure: bowling_alley}
+    min_zoom: 18
+    output:
+      <<: *output_properties
+      kind: bowling_alley
+  - filter: {leisure: dance}
+    min_zoom: 18
+    output:
+      <<: *output_properties
+      kind: dance
+  - filter: {leisure: ice_rink}
+    min_zoom: 18
+    output:
+      <<: *output_properties
+      kind: ice_rink
   - filter: {leisure: firepit}
     min_zoom: 18
     output:
@@ -2803,11 +2847,12 @@ filters:
       <<: *output_properties
       kind: sanitary_dump_station
 
-  - filter: { historic: wayside_cross }
+  - filter:
+      historic: [boundary_stone, cannon, castle, city_gate, manor, technical_monument, wayside_cross, wayside_shrine]
     min_zoom: 16
     output:
       <<: *output_properties
-      kind: wayside_cross
+      kind: {col: historic}
 
   ############################################################
   # TIER 6 EXTRA - ATTRACTION
