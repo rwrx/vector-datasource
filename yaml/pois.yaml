@@ -28,6 +28,7 @@ global:
     tower_type: {col: "tower:type"}
     tower_construction: {col: "tower:construction"}
     theatre_type: {col: "theatre:type"}
+    castle_type: {col: castle_type}
   - &transit_properties
     mz_transit_score: {col: mz_transit_score}
     mz_transit_root_relation_id: {col: mz_transit_root_relation_id}
@@ -553,6 +554,31 @@ filters:
     output:
       <<: *output_properties
       kind: observatory
+  - filter:
+      ruins: 'yes'
+      historic: [castle, monastery, wall]
+    min_zoom: 17
+    output:
+      <<: *output_properties
+      kind: ruins
+      kind_detail: {col: historic}
+  - filter:
+      ruins: monastery
+      historic: ruins
+    min_zoom: 17
+    output:
+      <<: *output_properties
+      kind: ruins
+      kind_detail: monastery
+  - filter:
+      barrier: wall
+      historic: ruins
+    min_zoom: 17
+    output:
+      <<: *output_properties
+      kind: ruins
+      kind_detail: wall
+
 
   ############################################################
   # TIER 2 OVERRIDES
